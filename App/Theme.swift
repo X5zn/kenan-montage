@@ -43,7 +43,7 @@ func ar(_ s: String) -> String {
 func ar(_ n: Int) -> String { ar(String(n)) }
 func arTime(_ seconds: Double) -> String {
     let s = max(0, Int(seconds.rounded()))
-    return ar(String(format: "%d:%02d", s / 60, s % 60))
+    return "\u{2066}" + ar(String(format: "%d:%02d", s / 60, s % 60)) + "\u{2069}"
 }
 
 struct GoldButtonStyle: ButtonStyle {
