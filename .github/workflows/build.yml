@@ -1,0 +1,92 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -v -i beta | sort -V | tail -1)
+          echo "Using $XC"; sudo xcode-select -s "$XC/Contents/Developer"; xcodebuild -version
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project KenanMontage.xcodeproj -scheme KenanMontage -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" | head -200
+      - name: Package IPA (ad-hoc signed, Sideloadly re-signs)
+        run: |
+          APP=$(find build/Build/Products -maxdepth 2 -name "KenanMontage.app" -type d | head -1)
+          codesign --force --sign - "$APP"
+          mkdir -p out/Payload && cp -R "$APP" out/Payload/
+          (cd out && zip -qry KenanMontage.ipa Payload)
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KenanMontage-ipa
+          path: out/KenanMontage.ipa
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: "*.log"
+
+  screens:
+    runs-on: macos-26
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | grep -v -i beta | sort -V | tail -1)
+          sudo xcode-select -s "$XC/Contents/Developer"
+      - name: Build for simulator
+        run: |
+          brew install xcodegen && xcodegen generate
+          set -o pipefail
+          xcodebuild -project KenanMontage.xcodeproj -scheme KenanMontage -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee sim.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" | head -100
+      - name: Screenshots
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['devices']
+          a=[x for k,v in d.items() if 'iOS' in k for x in v if x['name'].startswith('iPhone')]
+          p=[x for x in a if 'Pro' in x['name'] and 'Max' not in x['name']] or a
+          print(p[-1]['udid'])")
+          echo "Device $UDID"
+          xcrun simctl boot "$UDID"; xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --batteryLevel 100 --cellularBars 4 || true
+          APP=$(find build/Build/Products -maxdepth 2 -name "KenanMontage.app" -type d | head -1)
+          xcrun simctl install "$UDID" "$APP"
+          mkdir -p shots
+          for s in main suggest finish; do
+            xcrun simctl launch "$UDID" bot.tab.kenanmontage -screen $s
+            sleep 9
+            xcrun simctl io "$UDID" screenshot "shots/$s.png"
+            xcrun simctl terminate "$UDID" bot.tab.kenanmontage || true
+            sleep 1
+          done
+          ls -la shots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screens
+          path: shots/*.png
